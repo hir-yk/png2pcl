@@ -3,6 +3,7 @@ Convert PNG format image files to PCL
 
 
 ```
+$ python3 png_to_3d_pointcloud.py --help
 usage: png_to_3d_pointcloud.py [-h] [--x_meter X_METER] [--y_meter Y_METER] [--z_meter Z_METER] [--interval INTERVAL]
                                input_file output_file
 
