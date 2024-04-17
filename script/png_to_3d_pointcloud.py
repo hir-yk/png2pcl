@@ -18,12 +18,14 @@ def generate_pointcloud(input_file, output_file, x_meter, y_meter, z_meter, inte
         x = 0
         while x < width:
             # 色情報を取得（アルファチャンネルを無視する）
-            color = image[int(y), int(x)][:3]  # RGBAの場合、最初の3つの要素（RGB）のみを取得
+            bgr_color = image[int(y), int(x)][:3]  # BGR形式で色を取得
+            # BGRからRGBへ変換
+            rgb_color = bgr_color[::-1]  # 配列を反転させてRGBに変換
             # y座標を反転させる
             y_inverted = height - y
             # ポイントクラウドに点を追加
             points.append([x / width * x_meter, y_inverted / height * y_meter, z_meter])
-            colors.append(color)
+            colors.append(rgb_color)
             x += interval * width / x_meter
         y += interval * height / y_meter
 
