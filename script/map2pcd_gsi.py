@@ -9,6 +9,7 @@ import yaml
 import mgrs
 from geographiclib.geodesic import Geodesic
 import utm
+from osgeo import gdal, osr
 
 # Constants
 TILE_SIZE = 256
@@ -77,16 +78,16 @@ def get_map_image(lat_start, lon_start, lat_end, lon_end, zoom, map_image_filena
     bottom_left_deg = tile_to_deg(start_tile[0], end_tile[1] + 1, zoom)
     bottom_right_deg = tile_to_deg(end_tile[0] + 1, end_tile[1] + 1, zoom)
     
-    # 画像の縦横の距離を計算
+    # 画像の縦横の距離を計算（キロメートル単位）
     width_km = geodesic_distance(top_left_deg[0], top_left_deg[1], top_right_deg[0], top_right_deg[1])
     height_km = geodesic_distance(top_left_deg[0], top_left_deg[1], bottom_left_deg[0], bottom_left_deg[1])
     
-    # 全体の画像サイズを計算
-    total_width = (end_tile[0] - start_tile[0] + 1) * TILE_SIZE
-    total_height = (end_tile[1] - start_tile[1] + 1) * TILE_SIZE
+    # 全体の画像サイズを計算（ピクセル単位）
+    total_width_px = (end_tile[0] - start_tile[0] + 1) * TILE_SIZE
+    total_height_px = (end_tile[1] - start_tile[1] + 1) * TILE_SIZE
     
     # 全体の画像を作成
-    map_image = Image.new('RGB', (total_width, total_height))
+    map_image = Image.new('RGB', (total_width_px, total_height_px))
     print("地図画像を作成中...")
     
     # タイルをダウンロードして画像に貼り付け
@@ -100,10 +101,8 @@ def get_map_image(lat_start, lon_start, lat_end, lon_end, zoom, map_image_filena
     map_image.save(map_image_filename)
     print(f"地図画像を '{map_image_filename}' に保存しました。")
         
-    # 四隅の緯度経度と画像の縦横の距離を返す
-    return (top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km)
-    
-
+    # 四隅の緯度経度、画像の縦横の距離（キロメートル単位）、画像のサイズ（ピクセル単位）を返す
+    return (top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km, total_width_px, total_height_px)
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Download a map image from GSI map tiles.')
@@ -130,6 +129,57 @@ def calculate_local_position(lat, lon):
     
     return local_x, local_y
     
+
+def georeference_image(input_image_path, output_image_path, top_left_coord, pixel_size, image_size):
+    # 入力画像を開く
+    src_ds = gdal.Open(input_image_path)
+    if src_ds is None:
+        raise IOError(f"Failed to open the input image: {input_image_path}")
+
+    # ジオトランスフォームを定義
+    geotransform = (top_left_coord[1], pixel_size, 0, top_left_coord[0], 0, -pixel_size)
+    
+    # 一時的なGeoTIFFファイルを作成
+    driver = gdal.GetDriverByName('GTiff')
+    temp_ds = driver.CreateCopy(output_image_path, src_ds, 0)
+    temp_ds.SetGeoTransform(geotransform)
+    
+    # ソース空間参照（Webメルカトル）を定義
+    src_srs = osr.SpatialReference()
+    src_srs.ImportFromEPSG(3857)
+    temp_ds.SetProjection(src_srs.ExportToWkt())
+    
+    # データセットを閉じて変更を確定
+    temp_ds = None
+    src_ds = None
+       
+def reproject_image(input_image_path, output_image_path, input_epsg=3857, output_epsg=4326):
+    # Open the input image
+    input_ds = gdal.Open(input_image_path)
+    
+    # Define the source and destination spatial references
+    src_srs = osr.SpatialReference()
+    src_srs.ImportFromEPSG(input_epsg)
+    dst_srs = osr.SpatialReference()
+    dst_srs.ImportFromEPSG(output_epsg)
+    
+    # Create a coordinate transformation
+    transform = osr.CoordinateTransformation(src_srs, dst_srs)
+    
+    # Perform the reprojection
+    gdal.Warp(output_image_path, input_ds, srcSRS=src_srs, dstSRS=dst_srs, dstAlpha=True)
+    
+    # Clean up
+    input_ds = None
+    
+def calculate_pixel_size(zoom_level):
+    # 地球の円周（メートル単位）
+    earth_circumference = 40075016.686
+    # ズームレベル0でのタイルの数
+    initial_resolution = earth_circumference / TILE_SIZE
+    # 指定されたズームレベルでの解像度
+    resolution = initial_resolution / (2 ** zoom_level)
+    return resolution
     
 def main():
     # コマンドライン引数を解析
@@ -147,11 +197,30 @@ def main():
     map_image_filename = os.path.join(result_directory, 'map_image.png')
     yaml_filename = os.path.join(result_directory, 'map_dimensions.yaml')
 
-
     # 地図画像を取得して保存し、四隅の緯度経度と画像の縦横の距離を取得
-    top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km = get_map_image(
+    top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km, total_width_px, total_height_px = get_map_image(
         args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, map_image_filename, save_directory
     )
+    
+    # 例の使用法：
+    input_image_path = 'result/map_image.png'
+    output_image_path = 'result/map_image_georeferenced.png'
+    reprojected_image_path = 'result/map_image_reprojected.png'
+
+    # 画像のピクセルサイズを計算
+    pixel_size = calculate_pixel_size(args.zoom)
+    
+    # 地図画像に地理参照情報を追加
+    # ここで top_left_coord と image_size を適切に設定する必要があります
+    top_left_coord = (top_left_deg[1], top_left_deg[0])  # Webメルカトル投影での左上の座標
+    image_size = (total_width_px, total_height_px)  # 画像のサイズ（ピクセル単位）
+    output_image_path = os.path.splitext(map_image_filename)[0] + '_georeferenced.tif'
+    georeference_image(input_image_path, output_image_path, top_left_coord, pixel_size, image_size)
+
+    # 地理参照された画像をWGS84に再投影
+    reproject_image(output_image_path, reprojected_image_path)
+
+    print(f"Reprojected map image saved to '{reprojected_image_path}'")
     
     # 地図情報を辞書に格納
     map_info = {
