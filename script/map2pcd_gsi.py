@@ -67,23 +67,43 @@ def get_tile(zoom, xtile, ytile, save_directory):
         return None
 
 def get_map_image(lat_start, lon_start, lat_end, lon_end, zoom, map_image_filename, save_directory):
+    # タイル座標を計算
     start_tile = deg_to_tile(lat_start, lon_start, zoom)
     end_tile = deg_to_tile(lat_end, lon_end, zoom)
+    
+    # 四隅の緯度経度を計算
+    top_left_deg = tile_to_deg(start_tile[0], start_tile[1], zoom)
+    top_right_deg = tile_to_deg(end_tile[0] + 1, start_tile[1], zoom)
+    bottom_left_deg = tile_to_deg(start_tile[0], end_tile[1] + 1, zoom)
+    bottom_right_deg = tile_to_deg(end_tile[0] + 1, end_tile[1] + 1, zoom)
+    
+    # 画像の縦横の距離を計算
+    width_km = geodesic_distance(top_left_deg[0], top_left_deg[1], top_right_deg[0], top_right_deg[1])
+    height_km = geodesic_distance(top_left_deg[0], top_left_deg[1], bottom_left_deg[0], bottom_left_deg[1])
+    
+    # 全体の画像サイズを計算
     total_width = (end_tile[0] - start_tile[0] + 1) * TILE_SIZE
     total_height = (end_tile[1] - start_tile[1] + 1) * TILE_SIZE
-
+    
+    # 全体の画像を作成
     map_image = Image.new('RGB', (total_width, total_height))
     print("地図画像を作成中...")
-
+    
+    # タイルをダウンロードして画像に貼り付け
     for x in range(start_tile[0], end_tile[0] + 1):
         for y in range(start_tile[1], end_tile[1] + 1):
             tile_image = get_tile(zoom, x, y, save_directory)
             if tile_image:
                 map_image.paste(tile_image, ((x - start_tile[0]) * TILE_SIZE, (y - start_tile[1]) * TILE_SIZE))
-            # 進捗状況は get_tile 関数内で表示されます
-
+    
+    # 画像をファイルに保存
     map_image.save(map_image_filename)
     print(f"地図画像を '{map_image_filename}' に保存しました。")
+        
+    # 四隅の緯度経度と画像の縦横の距離を返す
+    return (top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km)
+    
+
 
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Download a map image from GSI map tiles.')
@@ -95,6 +115,22 @@ def parse_arguments():
     parser.add_argument('--interval', type=float, default=1.0, help='Interval between points in meters. Default is 1.0')
     return parser.parse_args()
 
+def calculate_local_position(lat, lon):
+    # 緯度経度をUTM座標に変換
+    utm_result = utm.from_latlon(lat, lon)
+    easting, northing, zone_number, zone_letter = utm_result
+    
+    # MGRS座標系の原点（100kmグリッドの南西角）のUTM座標を計算
+    origin_easting = int(easting // 100000) * 100000
+    origin_northing = int(northing // 100000) * 100000
+    
+    # 原点からの相対的な位置を計算（メートル単位）
+    local_x = easting - origin_easting
+    local_y = northing - origin_northing
+    
+    return local_x, local_y
+    
+    
 def main():
     # コマンドライン引数を解析
     args = parse_arguments()
@@ -111,39 +147,46 @@ def main():
     map_image_filename = os.path.join(result_directory, 'map_image.png')
     yaml_filename = os.path.join(result_directory, 'map_dimensions.yaml')
 
-    # 地図画像を取得して保存
-    get_map_image(args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, map_image_filename, save_directory)
-    print(f"地図画像を '{map_image_filename}' に保存しました。")
 
-    # 地図の寸法と角の座標を計算
-    width_km = geodesic_distance(args.lat_start, args.lon_start, args.lat_start, args.lon_end)
-    height_km = geodesic_distance(args.lat_start, args.lon_start, args.lat_end, args.lon_start)
-    print(f"地図の幅: {width_km} km, 高さ: {height_km} km")
-
+    # 地図画像を取得して保存し、四隅の緯度経度と画像の縦横の距離を取得
+    top_left_deg, top_right_deg, bottom_left_deg, bottom_right_deg, width_km, height_km = get_map_image(
+        args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, map_image_filename, save_directory
+    )
+    
     # 地図情報を辞書に格納
     map_info = {
         'corners': {
-            'top_left': [args.lat_start, args.lon_start],
-            'bottom_right': [args.lat_end, args.lon_end]
+            'top_left': top_left_deg,
+            'top_right': top_right_deg,
+            'bottom_left': bottom_left_deg,
+            'bottom_right': bottom_right_deg
         },
         'dimensions': {
             'width_km': width_km,
             'height_km': height_km
         }
     }
-
     # MGRSとローカルUTM座標を計算して辞書に追加
     m = mgrs.MGRS()
     bottom_left_lat, bottom_left_lon = map_info['corners']['bottom_right']
+    xtile, ytile = deg_to_tile(args.lat_end, args.lon_start, args.zoom)
+    bottom_left_deg = tile_to_deg(xtile, ytile+1, args.zoom)  # ytile + 1 でタイルの下の辺を取得
+    bottom_left_lat, bottom_left_lon = bottom_left_deg
     mgrs_code = m.toMGRS(bottom_left_lat, bottom_left_lon, MGRSPrecision=5)
-    origin_lat, origin_lon = m.toLatLon(mgrs_code[:5] + "00000" + "00000")
-    origin_utm = utm.from_latlon(origin_lat, origin_lon)
-    bottom_left_utm = utm.from_latlon(bottom_left_lat, bottom_left_lon)
-    local_x = bottom_left_utm[0] - origin_utm[0]
-    local_y = bottom_left_utm[1] - origin_utm[1]
-    local_x = round(float(local_x), 3)
-    local_y = round(float(local_y), 3)
-    print(f"MGRSコード: {mgrs_code}, ローカルX: {local_x} m, ローカルY: {local_y} m")
+    
+    # MGRS座標系の原点からの相対的な位置を計算
+    local_x, local_y = calculate_local_position(bottom_left_lat, bottom_left_lon)
+    local_x = float(local_x)
+    local_y = float(local_y)
+    
+    # 結果を辞書に追加
+    map_info['mgrs'] = {
+        'code': mgrs_code,
+        'local_x': round(local_x, 3),  # 小数点以下3桁で丸める
+        'local_y': round(local_y, 3)   # 小数点以下3桁で丸める
+    }
+    
+    print(f"MGRSコード: {mgrs_code}, ローカルX: {local_x:.3f} m, ローカルY: {local_y:.3f} m")
 
     # MGRSとローカルUTM座標をmap_infoに追加
     map_info['mgrs'] = {
