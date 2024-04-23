@@ -8,77 +8,27 @@ import subprocess
 import yaml
 import mgrs
 from geographiclib.geodesic import Geodesic
+import utm
 
-# geographiclibを使用して2点間の距離を計算する関数
+# Constants
+TILE_SIZE = 256
+EARTH_RADIUS_KM = 6371.0
+WGS84 = Geodesic.WGS84
+
+# Helper functions
 def geodesic_distance(lat1, lon1, lat2, lon2):
-    print(lat1, lon1, lat2, lon2)
-    geod = Geodesic.WGS84  # WGS84楕円体モデルを使用
-    result = geod.Inverse(lat1, lon1, lat2, lon2)
-    distance = result['s12']  # 距離をメートル単位で取得
-    return distance / 1000  #[km]
-    
-#   geodesic_distance公式を使用して2点間の距離を計算する関数
+    result = WGS84.Inverse(lat1, lon1, lat2, lon2)
+    return result['s12'] / 1000  # Return distance in kilometers
+
 def haversine(lat1, lon1, lat2, lon2):
-    R = 6371.0  # 地球の半径 (km)
     dLat = math.radians(lat2 - lat1)
     dLon = math.radians(lon2 - lon1)
-    a = math.sin(dLat/2) * math.sin(dLat/2) + \
-        math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) * \
-        math.sin(dLon/2) * math.sin(dLon/2)
-    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1-a))
-    distance = R * c
-    return distance * 1000 #[m]
+    a = (math.sin(dLat / 2) ** 2 +
+         math.cos(math.radians(lat1)) * math.cos(math.radians(lat2)) *
+         math.sin(dLon / 2) ** 2)
+    c = 2 * math.atan2(math.sqrt(a), math.sqrt(1 - a))
+    return EARTH_RADIUS_KM * c * 1000  # Return distance in meters
 
-# 画像の縦横の距離を計算し、YAMLファイルに出力する関数
-def output_map_dimensions_to_yaml(lat_start, lon_start, lat_end, lon_end, zoom, yaml_filename):
-    # 縦と横の距離を計算
-    width_km =   geodesic_distance(lat_start, lon_start, lat_start, lon_end)
-    height_km =   geodesic_distance(lat_start, lon_start, lat_end, lon_start)
-    
-    # 距離情報とコマンドライン引数の情報を辞書に格納
-    dimensions = {
-        'latitude_start': lat_start,
-        'longitude_start': lon_start,
-        'latitude_end': lat_end,
-        'longitude_end': lon_end,
-        'zoom': zoom,
-        'width_km': width_km,
-        'height_km': height_km
-    }
-    
-    # YAMLファイルに書き出し
-    with open(yaml_filename, 'w') as yaml_file:
-        yaml.dump(dimensions, yaml_file, default_flow_style=False)
-
-# 地理院地図のタイルを取得する関数
-def get_tile(zoom, xtile, ytile, save_directory):
-    # 保存するファイルのパスを構築
-    tile_filename = os.path.join(save_directory, f"{zoom}_{xtile}_{ytile}.png")
-    
-    # ファイルが既に存在するかチェック
-    if os.path.isfile(tile_filename):
-        print(f"Tile {zoom}_{xtile}_{ytile}.png already exists. Skipping download.")
-        return Image.open(tile_filename)
-    
-    # タイルのURLを構築
-    url = f"https://cyberjapandata.gsi.go.jp/xyz/std/{zoom}/{xtile}/{ytile}.png"
-    print(f"Downloading tile {zoom}_{xtile}_{ytile}.png...")
-    response = requests.get(url)
-    
-    # レスポンスが成功した場合にのみ処理を続ける
-    if response.status_code == 200:
-        print(f"Successfully downloaded tile {zoom}_{xtile}_{ytile}.png")
-        tile_image = Image.open(BytesIO(response.content))
-        # img_tiles ディレクトリが存在しない場合は作成
-        os.makedirs(save_directory, exist_ok=True)
-        # 画像をファイルとして保存
-        tile_image.save(tile_filename)
-        return tile_image
-    else:
-        print(f"Failed to download tile {zoom}_{xtile}_{ytile}.png. Status code: {response.status_code}")
-        return None
-
-# 緯度経度からタイル座標を計算する関数
 def deg_to_tile(lat_deg, lon_deg, zoom):
     lat_rad = math.radians(lat_deg)
     n = 2.0 ** zoom
@@ -86,78 +36,55 @@ def deg_to_tile(lat_deg, lon_deg, zoom):
     ytile = int((1.0 - math.asinh(math.tan(lat_rad)) / math.pi) / 2.0 * n)
     return (xtile, ytile)
 
-# タイル座標から緯度経度を計算する関数
 def tile_to_deg(xtile, ytile, zoom):
     n = 2.0 ** zoom
     lon_deg = xtile / n * 360.0 - 180.0
     lat_rad = math.atan(math.sinh(math.pi * (1 - 2 * ytile / n)))
     lat_deg = math.degrees(lat_rad)
     return (lat_deg, lon_deg)
-    
-# タイル座標からピクセル座標を計算する関数
-def tile_to_pixel(tile):
-    return (tile[0]*256, tile[1]*256)
 
-# 指定した緯度経度の範囲の地図をPNG画像として取得する関数
-# 指定した緯度経度の範囲の地図をPNG画像として取得する関数
-def get_map_image(lat_start, lon_start, lat_end, lon_end, zoom, map_image_filename, save_directory, yaml_filename):
-    # タイル座標を計算
+def tile_to_pixel(tile):
+    return (tile[0] * TILE_SIZE, tile[1] * TILE_SIZE)
+
+def get_tile(zoom, xtile, ytile, save_directory):
+    tile_filename = os.path.join(save_directory, f"{zoom}_{xtile}_{ytile}.png")
+    if os.path.isfile(tile_filename):
+        print(f"タイル {zoom}/{xtile}/{ytile} は既に存在します。スキップします。")
+        return Image.open(tile_filename)
+
+    # タイルのダウンロードを開始
+    print(f"タイル {zoom}/{xtile}/{ytile} をダウンロードしています...")
+    url = f"https://cyberjapandata.gsi.go.jp/xyz/std/{zoom}/{xtile}/{ytile}.png"
+    response = requests.get(url)
+    if response.status_code == 200:
+        tile_image = Image.open(BytesIO(response.content))
+        os.makedirs(save_directory, exist_ok=True)
+        tile_image.save(tile_filename)
+        print(f"タイル {zoom}/{xtile}/{ytile} をダウンロードしました。")
+        return tile_image
+    else:
+        print(f"タイル {zoom}/{xtile}/{ytile} のダウンロードに失敗しました。ステータスコード: {response.status_code}")
+        return None
+
+def get_map_image(lat_start, lon_start, lat_end, lon_end, zoom, map_image_filename, save_directory):
     start_tile = deg_to_tile(lat_start, lon_start, zoom)
     end_tile = deg_to_tile(lat_end, lon_end, zoom)
-    
-    # 四隅の緯度経度を計算（右下の緯度経度を取得するために+1を追加）
-    top_left_deg = tile_to_deg(start_tile[0], start_tile[1], zoom)
-    top_right_deg = tile_to_deg(end_tile[0] + 1, start_tile[1], zoom)
-    bottom_left_deg = tile_to_deg(start_tile[0], end_tile[1] + 1, zoom)
-    bottom_right_deg = tile_to_deg(end_tile[0] + 1, end_tile[1] + 1, zoom)
-    
-    # 画像の縦横の距離を計算
-    width_km =   geodesic_distance(top_left_deg[0], top_left_deg[1], top_right_deg[0], top_right_deg[1])
-    height_km =   geodesic_distance(top_left_deg[0], top_left_deg[1], bottom_left_deg[0], bottom_left_deg[1])
-    
-    # 四隅の緯度経度と画像の縦横の距離をYAMLファイルに出力
-    map_info = {
-        'corners': {
-            'top_left': list(top_left_deg),
-            'top_right': list(top_right_deg),
-            'bottom_left': list(bottom_left_deg),
-            'bottom_right': list(bottom_right_deg)
-        },
-        'dimensions': {
-            'width_km': width_km,
-            'height_km': height_km
-        }
-    }
-    with open(yaml_filename, 'a') as yaml_file:  # Write to the YAML file
-        yaml.dump(map_info, yaml_file, default_flow_style=False)
-    
-    # 全体の画像サイズを計算
-    total_width = (end_tile[0] - start_tile[0] + 1) * 256
-    total_height = (end_tile[1] - start_tile[1] + 1) * 256
-    
-    # 全体の画像を作成
-    map_image = Image.new('RGB', (total_width, total_height))
-    
+    total_width = (end_tile[0] - start_tile[0] + 1) * TILE_SIZE
+    total_height = (end_tile[1] - start_tile[1] + 1) * TILE_SIZE
 
-    # タイルをダウンロードして画像に貼り付け
+    map_image = Image.new('RGB', (total_width, total_height))
+    print("地図画像を作成中...")
+
     for x in range(start_tile[0], end_tile[0] + 1):
         for y in range(start_tile[1], end_tile[1] + 1):
-            tile_image = get_tile(zoom, x, y, save_directory)  # Use save_directory here
+            tile_image = get_tile(zoom, x, y, save_directory)
             if tile_image:
-                map_image.paste(tile_image, ((x - start_tile[0]) * 256, (y - start_tile[1]) * 256))
-    
-    # 指定範囲のピクセル座標を計算
-    start_pixel = tile_to_pixel(start_tile)
-    end_pixel = tile_to_pixel(end_tile)
-    
-    # 指定範囲を切り取り
-    cropped_image = map_image.crop((0, 0, end_pixel[0] - start_pixel[0] + 256, end_pixel[1] - start_pixel[1] + 256))
-    
-    # PNG画像として保存
-#    output_map_dimensions_to_yaml(lat_start, lon_start, lat_end, lon_end, 'map_dimensions.yaml')
-    cropped_image.save(map_image_filename)
-    
-# コマンドライン引数を解析する関数
+                map_image.paste(tile_image, ((x - start_tile[0]) * TILE_SIZE, (y - start_tile[1]) * TILE_SIZE))
+            # 進捗状況は get_tile 関数内で表示されます
+
+    map_image.save(map_image_filename)
+    print(f"地図画像を '{map_image_filename}' に保存しました。")
+
 def parse_arguments():
     parser = argparse.ArgumentParser(description='Download a map image from GSI map tiles.')
     parser.add_argument('lat_start', type=float, help='Starting latitude')
@@ -168,80 +95,82 @@ def parse_arguments():
     parser.add_argument('--interval', type=float, default=1.0, help='Interval between points in meters. Default is 1.0')
     return parser.parse_args()
 
-# メイン関数
 def main():
+    # コマンドライン引数を解析
     args = parse_arguments()
-    # result ディレクトリを指定
+    print("コマンドライン引数を解析しました。")
+
+    # 結果を保存するディレクトリを設定
     result_directory = "result"
-    # img_tiles ディレクトリを指定
     save_directory = os.path.join(result_directory, "img_tiles")
-    # result ディレクトリが存在しない場合は作成
     os.makedirs(result_directory, exist_ok=True)
-    os.makedirs(save_directory, exist_ok=True)  # Ensure img_tiles directory exists
-    # 合成した地図画像のファイル名
+    os.makedirs(save_directory, exist_ok=True)
+    print(f"ディレクトリ '{result_directory}' と '{save_directory}' を作成または確認しました。")
+
+    # 地図画像とYAMLファイルのファイル名を設定
     map_image_filename = os.path.join(result_directory, 'map_image.png')
-    # YAMLファイルの名前
     yaml_filename = os.path.join(result_directory, 'map_dimensions.yaml')
-    
 
-    # 地図画像の寸法情報をYAMLファイルに出力（zoom引数を追加）    output_map_dimensions_to_yaml(args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, yaml_filename)
-    # 地図画像を取得して保存し、四隅の緯度経度をYAMLファイルに出力
-    get_map_image(args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, map_image_filename, save_directory, yaml_filename)
+    # 地図画像を取得して保存
+    get_map_image(args.lat_start, args.lon_start, args.lat_end, args.lon_end, args.zoom, map_image_filename, save_directory)
+    print(f"地図画像を '{map_image_filename}' に保存しました。")
 
- # YAMLファイルからパラメータを読み込む
-    with open(yaml_filename, 'r') as yaml_file:
-        map_info = yaml.safe_load(yaml_file)
-    
-    # PNG画像からPCLを生成するためのパラメータを取得
-    width_km = map_info['dimensions']['width_km']
-    height_km = map_info['dimensions']['height_km']
-    
-    
-    # MGRSコードを取得する
+    # 地図の寸法と角の座標を計算
+    width_km = geodesic_distance(args.lat_start, args.lon_start, args.lat_start, args.lon_end)
+    height_km = geodesic_distance(args.lat_start, args.lon_start, args.lat_end, args.lon_start)
+    print(f"地図の幅: {width_km} km, 高さ: {height_km} km")
+
+    # 地図情報を辞書に格納
+    map_info = {
+        'corners': {
+            'top_left': [args.lat_start, args.lon_start],
+            'bottom_right': [args.lat_end, args.lon_end]
+        },
+        'dimensions': {
+            'width_km': width_km,
+            'height_km': height_km
+        }
+    }
+
+    # MGRSとローカルUTM座標を計算して辞書に追加
     m = mgrs.MGRS()
-    bottom_left_lat, bottom_left_lon = map_info['corners']['bottom_left']
+    bottom_left_lat, bottom_left_lon = map_info['corners']['bottom_right']
     mgrs_code = m.toMGRS(bottom_left_lat, bottom_left_lon, MGRSPrecision=5)
-    
-    # MGRS座標系の原点の緯度経度を取得する
     origin_lat, origin_lon = m.toLatLon(mgrs_code[:5] + "00000" + "00000")
-    print(mgrs_code[:5] + "00000" + "00000")
-    print(origin_lat,origin_lon)
-    
-    # MGRS座標系の原点からの距離を算出する
-    local_x = geodesic_distance(origin_lat, origin_lon, origin_lat, bottom_left_lon) * 1000  # メートル単位に変換
-    local_y = geodesic_distance(origin_lat, origin_lon, bottom_left_lat, origin_lon) * 1000  # メートル単位に変換
-    
-    # 小数点以下第3位までの精度で丸める
-    local_x = round(local_x, 3)
-    local_y = round(local_y, 3)
-        
-    # MGRSコードと距離をYAMLファイルに出力する
+    origin_utm = utm.from_latlon(origin_lat, origin_lon)
+    bottom_left_utm = utm.from_latlon(bottom_left_lat, bottom_left_lon)
+    local_x = bottom_left_utm[0] - origin_utm[0]
+    local_y = bottom_left_utm[1] - origin_utm[1]
+    local_x = round(float(local_x), 3)
+    local_y = round(float(local_y), 3)
+    print(f"MGRSコード: {mgrs_code}, ローカルX: {local_x} m, ローカルY: {local_y} m")
+
+    # MGRSとローカルUTM座標をmap_infoに追加
     map_info['mgrs'] = {
         'code': mgrs_code,
         'local_x': local_x,
         'local_y': local_y
     }
-    
+
+    # map_infoをYAMLファイルに書き出し
     with open(yaml_filename, 'w') as yaml_file:
         yaml.dump(map_info, yaml_file, default_flow_style=False)
-        
-    # png2pcl.pyを実行するためのコマンドを構築
+    print(f"地図情報を '{yaml_filename}' に書き出しました。")
+
+    # png2pcl.pyコマンドを構築して実行
     png2pcl_command = [
         'python3', 'png2pcd.py',
-        map_image_filename,  # 入力PNGファイル
-        os.path.splitext(map_image_filename)[0] + '.pcd',  # 出力PCDファイル
-        '--x_meter', str(width_km * 1000),  # 幅（メートル単位）
-        '--y_meter', str(height_km * 1000),  # 高さ（メートル単位）
-        '--z_meter', '0',  # 基準高さ（メートル単位）
-        '--interval', str(args.interval),  # ポイント間の間隔（メートル単位）
-        '--offset_x', str(local_x),  # X方向のオフセット（メートル単位）
-        '--offset_y', str(local_y)   # Y方向のオフセット（メートル単位）
+        map_image_filename,
+        os.path.splitext(map_image_filename)[0] + '.pcd',
+        '--x_meter', str(map_info['dimensions']['width_km'] * 1000),
+        '--y_meter', str(map_info['dimensions']['height_km'] * 1000),
+        '--z_meter', '0',
+        '--interval', str(args.interval),
+        '--offset_x', str(map_info['mgrs']['local_x']),
+        '--offset_y', str(map_info['mgrs']['local_y'])
     ]
-    
-    # png2pcl.pyを実行
+    print(f"png2pcl.pyコマンドを実行します: {' '.join(png2pcl_command)}")
     subprocess.run(png2pcl_command)
-
 
 if __name__ == '__main__':
     main()
-
